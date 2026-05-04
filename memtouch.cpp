@@ -45,12 +45,14 @@ class WorkerThread {
                  bool     run_once_,
                  unsigned mem_size_mib_,
                  unsigned rw_ratio_,
-                 uint64_t page_log_ival_)
+                 uint64_t page_log_ival_,
+                 bool     streaming_writes_)
         : id(id_),
           run_once(run_once_),
           mem_size_mib(mem_size_mib_),
           rw_ratio(rw_ratio_),
           page_log_ival(page_log_ival_),
+          streaming_writes(streaming_writes_),
           stats() {}
 
     bool pre_run() {
@@ -58,6 +60,15 @@ class WorkerThread {
             printf("Worker %d: Unable to allocate memory\n", id);
             return false;
         }
+
+#if defined(__x86_64__)
+        if (streaming_writes) {
+            // The following assertion should pass because the allocated memory is backed by a
+            // memory map which are always aligned to the page size.
+            auto addr_base = reinterpret_cast<uint64_t>(mem_base);
+            assert((addr_base % 16) == 0);
+        }
+#endif
 
         return true;
     }
@@ -165,6 +176,12 @@ class WorkerThread {
     }
 
     void write_page(uint64_t page) {
+#if defined(__x86_64__)
+        if (streaming_writes) {
+            return write_page_nt(page);
+        }
+#endif
+
         memset(static_cast<char*>(mem_base) + page * PAGE_SIZE, PATTERN, PAGE_SIZE);
     }
 
@@ -220,6 +237,7 @@ class WorkerThread {
     unsigned mem_size_mib;
     unsigned rw_ratio;
     uint64_t page_log_ival;
+    bool     streaming_writes;
 
     bool terminate{false};
 
@@ -357,6 +375,11 @@ void setup_argparse(argparse::ArgumentParser& program, int argc, char** argv) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--disable_nt")
+        .help("Do not provide a non-temporal hint when writing memory pages")
+        .default_value(false)
+        .implicit_value(true);
+
     try {
         program.parse_args(argc, argv);
     } catch (const std::exception& err) {
@@ -372,10 +395,11 @@ int main(int argc, char** argv) {
     setup_signals();
     setup_argparse(program, argc, argv);
 
-    auto thread_mem  = program.get<unsigned>("--thread_mem");
-    auto num_threads = program.get<unsigned>("--num_threads");
-    auto rw_ratio    = program.get<unsigned>("--rw_ratio");
-    auto once        = program.get<bool>("--once");
+    auto thread_mem       = program.get<unsigned>("--thread_mem");
+    auto num_threads      = program.get<unsigned>("--num_threads");
+    auto rw_ratio         = program.get<unsigned>("--rw_ratio");
+    auto once             = program.get<bool>("--once");
+    auto streaming_writes = !(program.get<bool>("--disable_nt"));
 
     std::string stats_file;
     unsigned    stats_ival;
@@ -428,7 +452,8 @@ int main(int argc, char** argv) {
     thread_storage.reserve(num_threads + 1 /* statistics thread */);
 
     for (unsigned num_thread = 0; num_thread < num_threads; num_thread++) {
-        worker_storage.emplace_back(num_thread, once, thread_mem, rw_ratio, page_log_ival);
+        worker_storage.emplace_back(num_thread, once, thread_mem, rw_ratio, page_log_ival,
+                                    streaming_writes);
         if (not worker_storage.back().pre_run()) {
             worker_storage.clear();
             return 1;
