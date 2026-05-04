@@ -9,6 +9,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__x86_64__)
+#include <emmintrin.h>
+#endif
+
 #include <assert.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -163,6 +167,29 @@ class WorkerThread {
     void write_page(uint64_t page) {
         memset(static_cast<char*>(mem_base) + page * PAGE_SIZE, PATTERN, PAGE_SIZE);
     }
+
+#if defined(__x86_64__)
+    void write_page_nt(uint64_t page) {
+        // This requires SSE2 which is always available on x86_64
+        auto pattern = _mm_set1_epi8(static_cast<int8_t>(PATTERN));
+
+        static_assert((PAGE_SIZE % 16) == 0, "PAGE SIZE is not a multiple of 16");
+        auto num_iterations = PAGE_SIZE / 16;
+
+        char* mem_addr = ((char*)mem_base) + (page * PAGE_SIZE);
+
+        for (uint64_t n{0}; n < num_iterations; ++n) {
+            // This requires SSE2 which is always available on x86_64.
+            // The `pre_run` method ensures that mem_base is a multiple of 16
+            _mm_stream_si128(reinterpret_cast<__m128i*>(mem_addr), pattern);
+            mem_addr += 16;
+        }
+
+        // Non-temporal stores are weakly ordered hence we apply a fence to ensure that
+        // our stores are ordered before any subsequent (in program order) loads and stores.
+        _mm_sfence();
+    }
+#endif
 
     void read_page(uint64_t page, void* buffer) {
         memcpy(buffer, static_cast<char*>(mem_base) + page * PAGE_SIZE, PAGE_SIZE);
