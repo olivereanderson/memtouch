@@ -1,6 +1,7 @@
 #include <argparse.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -20,6 +21,8 @@
 static constexpr uint64_t PAGE_SIZE(4096);
 static constexpr int      PATTERN(0xff);
 static constexpr int      DEFAULT_STAT_IVAL(1000);
+
+static std::atomic<bool> global_terminate{false};
 
 using namespace std;
 
@@ -67,17 +70,17 @@ class WorkerThread {
 
         // Warmup, write every page
         for (uint64_t page{0}; page < num_pages; ++page) {
-            if (terminate) {
+            if (global_terminate.load(std::memory_order_relaxed)) {
                 break;
             }
             write_page(page);
         }
 
         if (run_once) {
-            kill();
+            return;
         }
 
-        while (not terminate) {
+        while (not global_terminate.load(std::memory_order_relaxed)) {
             run_loop(num_pages);
         }
     }
@@ -185,8 +188,6 @@ class WorkerThread {
         return mem_base != MAP_FAILED;
     }
 
-    void kill() { terminate = true; }
-
     float write_rate() const { return stats.write_rate.load(); }
 
     float read_rate() const { return stats.read_rate.load(); }
@@ -197,8 +198,6 @@ class WorkerThread {
     unsigned mem_size_mib;
     unsigned rw_ratio;
     uint64_t page_log_ival;
-
-    bool terminate{false};
 
     void* mem_base{nullptr};
 
@@ -218,7 +217,7 @@ class StatisticsThread {
     }
 
     void run() {
-        while (not terminate) {
+        while (not global_terminate.load(std::memory_order_relaxed)) {
             float read_rate{0};
             float write_rate{0};
 
@@ -237,8 +236,6 @@ class StatisticsThread {
             usleep(logging_ival_ms * 1000);
         }
     }
-
-    void kill() { terminate = true; }
 
     void set_interval(unsigned ival_ms) { logging_ival_ms = ival_ms; }
 
@@ -271,7 +268,6 @@ class StatisticsThread {
    private:
     vector<WorkerThread>& workers;
 
-    bool     terminate{false};
     unsigned logging_ival_ms{DEFAULT_STAT_IVAL};
 
     ofstream log_file{};
@@ -284,11 +280,10 @@ StatisticsThread           stat_thread(worker_storage);
 
 void sigint_handler([[maybe_unused]] int s) {
     printf("Terminating...\n");
-    for (auto& worker : worker_storage) {
-        worker.kill();
-    }
 
-    stat_thread.kill();
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "TERMINATE must be lock-free for async-signal-handler safety");
+    global_terminate.store(true, std::memory_order_relaxed);
 }
 
 void setup_signals() {
@@ -344,6 +339,7 @@ void setup_argparse(argparse::ArgumentParser& program, int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    // global_terminate.store(false, std::memory_order_relaxed);
     argparse::ArgumentParser program("memtouch", PROJECT_VERSION);
 
     setup_signals();
