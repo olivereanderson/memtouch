@@ -49,6 +49,8 @@ class WorkerThread {
           page_log_ival(page_log_ival_),
           stats() {}
 
+    ~WorkerThread() { cleanup_memory(); }
+
     bool pre_run() {
         if (not allocate_memory()) {
             printf("Worker %d: Unable to allocate memory\n", id);
@@ -78,8 +80,6 @@ class WorkerThread {
         while (not terminate) {
             run_loop(num_pages);
         }
-
-        cleanup_memory();
     }
 
     int64_t measure_time_ns(std::function<void()> func) {
